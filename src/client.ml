@@ -407,12 +407,11 @@ struct
           Pipe.close writer))
   ;;
 
-  let create ?on_disconnect ~where_to_connect () =
-    let%bind.Deferred.Or_error _socket, reader, writer =
-      (* Tcp.connect will raise if the connection attempt times out, but we'd prefer to
-         return an Error. *)
-      Monitor.try_with_or_error (fun () -> Tcp.connect where_to_connect)
-    in
+  let close_finished t =
+    let%bind () = Writer.close_finished t.writer in
+    Reader.close_finished t.reader
+
+  let create_internal ?on_disconnect reader writer =
     let pending_response = Queue.create () in
     let t =
       { pending_response
@@ -424,6 +423,7 @@ struct
       }
     in
     Writer.set_raise_when_consumer_leaves writer false;
+
     don't_wait_for
       (let%bind reason = read t in
        let reason =
@@ -437,6 +437,45 @@ struct
          Ivar.fill R.this (Error reason));
        Queue.clear t.pending_response;
        Option.iter on_disconnect ~f:(fun f -> f ()));
+    t
+
+  let maybe_ssl_wrap ?on_disconnect ~use_tls reader writer =
+    match use_tls with
+    | false ->
+       let t = create_internal ?on_disconnect reader writer in
+       return t
+    | true ->
+        Writer.set_raise_when_consumer_leaves writer false;
+        let%map t, (_ : [ `Connection_closed of unit Deferred.t ]) =
+          Async_ssl.Tls.Expert.wrap_client_connection_and_stay_open
+            (Async_ssl.Config.Client.create
+               ~verify_modes:[ Verify_none ]
+               ~ca_file:None
+               ~ca_path:None
+               ~remote_hostname:None
+               ~verify_callback:(fun (_ : Async_ssl.Ssl.Connection.t) ->
+                 return (Ok ()))
+               ())
+            reader
+            writer
+            ~f:(fun (_ : Async_ssl.Ssl.Connection.t) ssl_reader ssl_writer ->
+              let t = create_internal ?on_disconnect ssl_reader ssl_writer in
+              let close_finished_deferred =
+                let%bind _ = close_finished t in
+                return ()
+              in
+              return (t, `Do_not_close_until close_finished_deferred))
+        in
+        t
+
+  let create ?on_disconnect ?(use_tls = false) ~where_to_connect () =
+    let%bind.Deferred.Or_error _socket, reader, writer =
+      (* Tcp.connect will raise if the connection attempt times out, but we'd prefer to
+         return an Error. *)
+      Monitor.try_with_or_error (fun () -> Tcp.connect where_to_connect)
+    in
+    let%bind t = maybe_ssl_wrap ?on_disconnect ~use_tls reader writer in
+
     (* Tell the session that we will be speaking RESP3 *)
     let%map.Deferred.Or_error _ =
       command_string t [ "HELLO"; "3" ] (Response.create_resp3 ())

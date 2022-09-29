@@ -15,6 +15,7 @@ module Make (Key : Bulk_io_intf.S) (Field : Bulk_io_intf.S) (Value : Bulk_io_int
 
   val create
     :  ?on_disconnect:(unit -> unit)
+    -> ?use_tls:bool
     -> where_to_connect:[< Socket.Address.t ] Tcp.Where_to_connect.t
     -> unit
     -> Key.t t Deferred.Or_error.t

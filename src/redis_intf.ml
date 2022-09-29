@@ -24,6 +24,7 @@ module type S = sig
 
   val create
     :  ?on_disconnect:(unit -> unit)
+    -> ?use_tls:bool
     -> where_to_connect:[< Socket.Address.t ] Tcp.Where_to_connect.t
     -> unit
     -> t Deferred.Or_error.t
